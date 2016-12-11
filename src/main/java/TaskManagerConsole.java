@@ -4,15 +4,32 @@ import com.mashape.unirest.http.HttpResponse;
 import com.mashape.unirest.http.Unirest;
 import com.mashape.unirest.http.exceptions.UnirestException;
 import org.apache.commons.cli.*;
+import org.joda.time.DateTime;
+import org.joda.time.Duration;
+import org.joda.time.LocalTime;
 
 public class TaskManagerConsole {
     private Gson jsonParser;
     private Options options;
     private static final String API_ENDPOINT = "http://138.197.15.79/task";
+    private static volatile boolean canExecute = true;
 
     public static void main(String[] args) {
-        TaskManagerConsole taskManager = new TaskManagerConsole();
+        final TaskManagerConsole taskManager = new TaskManagerConsole();
         taskManager.execute(args);
+
+        final Thread mainThread = Thread.currentThread();
+        Runtime.getRuntime().addShutdownHook(new Thread(){
+            public void run(){
+                canExecute = false;
+                try {
+                    taskManager.stopTask();
+                    mainThread.join();
+                } catch (InterruptedException e) {
+                    System.out.println("Shutdown interrupted!");
+                }
+            }
+        });
     }
 
     private TaskManagerConsole() {
@@ -43,7 +60,13 @@ public class TaskManagerConsole {
 
         if(name.compareTo("new") == 0) {
             newTask(option.getValues());
+        } else if(name.compareTo("list") == 0) {
+            listTasks();
         }
+    }
+
+    private void listTasks() {
+        
     }
 
     private void newTask(String[] args) {
@@ -65,7 +88,8 @@ public class TaskManagerConsole {
             System.out.println("Task added with ID " + task.get("id"));
 
             if(isStartable) {
-
+                System.out.println("Starting task");
+                startTask(task.get("id").getAsInt());
             }
         } catch (UnirestException e) {
             System.out.println("Failed to add new task.");
@@ -78,6 +102,53 @@ public class TaskManagerConsole {
      */
     private void startTask(int id) {
         JsonObject task = getTask(id);
+
+        if(task != null && task.get("id") != null) {
+            try {
+                JsonObject timer = sendPostRequest("/" + id + "/start", "");
+                runTimer(task, timer.get("start").getAsString());
+            } catch (UnirestException e) {
+                die("Failed to start task.");
+            }
+        } else {
+            die("ERROR: That task doesn't exist.");
+        }
+    }
+
+    private void stopTask() {
+        System.out.println("Stopping task.");
+    }
+
+    private void runTimer(JsonObject task, String startTime) {
+        DateTime start = DateTime.parse(startTime);
+
+        while(true) {
+            long timeInSeconds = System.currentTimeMillis() % 1000;
+            LocalTime now = new LocalTime();
+
+            System.out.print("\r" + formatTimeDifference(start, now.toDateTimeToday()) + " (ctrl+x to stop)");
+
+            try {
+                Thread.sleep(1000 - timeInSeconds);
+            } catch (InterruptedException e) {
+                System.out.println("Task " + task.get("id") + " stopped!");
+                break;
+            }
+        }
+    }
+
+    private String formatTimeDifference(DateTime start, DateTime end) {
+        Duration duration = new Duration(start, end);
+
+        if(duration.getStandardSeconds() <= 0) {
+            return "Initializing timer...";
+        }
+
+        return String.format("%02d:%02d:%02d",
+                duration.getStandardHours() % 24,
+                duration.getStandardMinutes() % 60,
+                duration.getStandardSeconds() % 60
+        );
     }
 
     /**
@@ -88,7 +159,7 @@ public class TaskManagerConsole {
      */
     private JsonObject getTask(int id) {
         try {
-            return sendGetRequest(id + "");
+            return sendGetRequest("/" + id);
         } catch (UnirestException e) {
             die("Failed to load task.");
         }
@@ -123,7 +194,7 @@ public class TaskManagerConsole {
      * @throws UnirestException
      */
     private JsonObject sendGetRequest(String endpointSuffix) throws UnirestException {
-        HttpResponse response = Unirest.post(API_ENDPOINT + endpointSuffix)
+        HttpResponse response = Unirest.get(API_ENDPOINT + endpointSuffix)
                 .header("Content-Type", "application/json")
                 .header("accept", "application/json")
                 .asJson();
