@@ -62,6 +62,10 @@ public class TaskManagerConsole {
             newTask(option.getValues());
         } else if(name.compareTo("list") == 0) {
             listTasks();
+        } else if(name.compareTo("remove") == 0) {
+            removeTask(Integer.parseInt(option.getValue()));
+        } else if(name.compareTo("start") == 0) {
+            startTask(Integer.parseInt(option.getValue()));
         }
     }
 
@@ -78,6 +82,22 @@ public class TaskManagerConsole {
             }
         } catch (UnirestException e) {
             die("Failed to load tasks!");
+        }
+    }
+
+    private void removeTask(int id) {
+        try {
+            JsonObject response = deserializeJsonObject(sendDeleteRequest("/" + id));
+            boolean isSuccessful = response.get("success").getAsBoolean();
+
+            if(isSuccessful) {
+                System.out.println("Task " + id + " deleted!");
+            } else {
+                System.out.println("Failed to delete task: " + response.get("message").getAsString());
+            }
+
+        } catch (UnirestException e) {
+            die("Failed to delete task. It may have already been deleted.");
         }
     }
 
@@ -104,6 +124,7 @@ public class TaskManagerConsole {
                 startTask(task.get("id").getAsInt());
             }
         } catch (UnirestException e) {
+            stopTask();
             System.out.println("Failed to add new task.");
         }
     }
@@ -118,13 +139,31 @@ public class TaskManagerConsole {
         if(task != null && task.get("id") != null) {
             try {
                 JsonObject timer = sendPostRequest("/" + id + "/start", "");
-                runTimer(task, timer.get("start").getAsString());
+
+                if(timer.get("error") != null) {
+                    JsonObject runningEntry = getRunningTimeEntry(id);
+                    assert runningEntry != null;
+                    runTimer(task, runningEntry.get("start").getAsString());
+                } else {
+                    runTimer(task, timer.get("start").getAsString());
+                }
+
             } catch (UnirestException e) {
                 die("Failed to start task.");
             }
         } else {
             die("ERROR: That task doesn't exist.");
         }
+    }
+
+    private JsonObject getRunningTimeEntry(int taskId) throws UnirestException {
+        JsonObject[] response = deserializeJsonArray(sendGetRequest("/timeentry/running/" + taskId));
+
+        if(response.length > 0) {
+            return response[0];
+        }
+
+        return null;
     }
 
     private void stopTask() {
@@ -214,6 +253,23 @@ public class TaskManagerConsole {
         return response.getBody().toString();
     }
 
+    /**
+     * Send a DELETE request to the API.
+     *
+     * @param endpointSuffix - The route to send the request. (e.g /tasks/all)
+     * @return The API response.
+     *
+     * @throws UnirestException
+     */
+    private String sendDeleteRequest(String endpointSuffix) throws UnirestException {
+        HttpResponse response = Unirest.delete(API_ENDPOINT + endpointSuffix)
+                .header("Content-Type", "application/json")
+                .header("accept", "application/json")
+                .asJson();
+
+        return response.getBody().toString();
+    }
+
     private JsonObject deserializeJsonObject(String json) {
         return jsonParser.fromJson(json, JsonObject.class);
     }
@@ -258,10 +314,6 @@ public class TaskManagerConsole {
         startTask.setArgs(1);
         startTask.setArgName("start");
 
-        //Stop existing task
-        Option stopTask = new Option("stop", false, "Stop a task that has already been started.");
-        stopTask.setArgName("stop");
-
         //Remove task
         Option removeTask = new Option("remove", true, "Remove (delete) a task from the task manager.");
         removeTask.setArgs(1);
@@ -278,7 +330,6 @@ public class TaskManagerConsole {
         commands.addOption(addTask);
         commands.addOption(removeTask);
         commands.addOption(startTask);
-        commands.addOption(stopTask);
         commands.addOption(listTasks);
         commands.addOption(help);
 
