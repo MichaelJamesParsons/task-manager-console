@@ -65,8 +65,20 @@ public class TaskManagerConsole {
         }
     }
 
+    /**
+     * Lists all of the tasks.
+     */
     private void listTasks() {
-        
+        try {
+            JsonObject[] tasks = deserializeJsonArray(sendGetRequest("/all"));
+
+            System.out.println("Your tasks (recent first):");
+            for(JsonObject task : tasks) {
+                System.out.println(task.get("id") + ". " + task.get("description").getAsString());
+            }
+        } catch (UnirestException e) {
+            die("Failed to load tasks!");
+        }
     }
 
     private void newTask(String[] args) {
@@ -159,7 +171,7 @@ public class TaskManagerConsole {
      */
     private JsonObject getTask(int id) {
         try {
-            return sendGetRequest("/" + id);
+            return deserializeJsonObject(sendGetRequest("/" + id));
         } catch (UnirestException e) {
             die("Failed to load task.");
         }
@@ -182,7 +194,7 @@ public class TaskManagerConsole {
                 .body(payload)
                 .asJson();
 
-        return deserializeJson(response.getBody().toString());
+        return deserializeJsonObject(response.getBody().toString());
     }
 
     /**
@@ -193,17 +205,21 @@ public class TaskManagerConsole {
      *
      * @throws UnirestException
      */
-    private JsonObject sendGetRequest(String endpointSuffix) throws UnirestException {
+    private String sendGetRequest(String endpointSuffix) throws UnirestException {
         HttpResponse response = Unirest.get(API_ENDPOINT + endpointSuffix)
                 .header("Content-Type", "application/json")
                 .header("accept", "application/json")
                 .asJson();
 
-        return deserializeJson(response.getBody().toString());
+        return response.getBody().toString();
     }
 
-    private JsonObject deserializeJson(String json) {
+    private JsonObject deserializeJsonObject(String json) {
         return jsonParser.fromJson(json, JsonObject.class);
+    }
+
+    private JsonObject[] deserializeJsonArray(String json) {
+        return jsonParser.fromJson(json, JsonObject[].class);
     }
 
     private CommandLine initializeCli(String[] args) throws ParseException {
