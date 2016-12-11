@@ -66,6 +66,8 @@ public class TaskManagerConsole {
             removeTask(Integer.parseInt(option.getValue()));
         } else if(name.compareTo("start") == 0) {
             startTask(Integer.parseInt(option.getValue()));
+        } else if(name.compareTo("help") == 0) {
+            dieWithHelper();
         }
     }
 
