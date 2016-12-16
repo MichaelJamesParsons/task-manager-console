@@ -1,4 +1,6 @@
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.mashape.unirest.http.HttpResponse;
 import com.mashape.unirest.http.Unirest;
@@ -8,11 +10,12 @@ import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.LocalTime;
 
+import java.util.concurrent.TimeUnit;
+
 public class TaskManagerConsole {
     private Gson jsonParser;
     private Options options;
-    private static final String API_ENDPOINT = "http://138.197.15.79/task";
-    private static volatile boolean canExecute = true;
+    private static final String API_ENDPOINT = "http://138.197.15.79";
 
     public static void main(String[] args) {
         final TaskManagerConsole taskManager = new TaskManagerConsole();
@@ -21,9 +24,7 @@ public class TaskManagerConsole {
         final Thread mainThread = Thread.currentThread();
         Runtime.getRuntime().addShutdownHook(new Thread(){
             public void run(){
-                canExecute = false;
                 try {
-                    taskManager.stopTask();
                     mainThread.join();
                 } catch (InterruptedException e) {
                     System.out.println("Shutdown interrupted!");
@@ -37,6 +38,11 @@ public class TaskManagerConsole {
         jsonParser = new Gson();
     }
 
+    /**
+     * Execute the given CLI arguments.
+     *
+     * @param args - A list of CLI arguments.
+     */
     private void execute(String[] args) {
         try {
             CommandLine cli = initializeCli(args);
@@ -55,11 +61,17 @@ public class TaskManagerConsole {
         }
     }
 
+    /**
+     * Determine which method should be executed by the name
+     * of the given command.
+     *
+     * @param option - The selected CLI option.
+     */
     private void processOption(Option option) {
         String name = option.getArgName();
 
-        if(name.compareTo("new") == 0) {
-            newTask(option.getValues());
+        if(name.compareTo("add") == 0) {
+            addTask(option.getValues());
         } else if(name.compareTo("list") == 0) {
             listTasks();
         } else if(name.compareTo("remove") == 0) {
@@ -67,6 +79,7 @@ public class TaskManagerConsole {
         } else if(name.compareTo("start") == 0) {
             startTask(Integer.parseInt(option.getValue()));
         } else if(name.compareTo("help") == 0) {
+            //Invalid command. This should never happen.
             dieWithHelper();
         }
     }
@@ -76,7 +89,7 @@ public class TaskManagerConsole {
      */
     private void listTasks() {
         try {
-            JsonObject[] tasks = deserializeJsonArray(sendGetRequest("/all"));
+            JsonObject[] tasks = deserializeJsonArray(sendGetRequest("/task/all"));
 
             System.out.println("Your tasks (recent first):");
             for(JsonObject task : tasks) {
@@ -89,7 +102,7 @@ public class TaskManagerConsole {
 
     private void removeTask(int id) {
         try {
-            JsonObject response = deserializeJsonObject(sendDeleteRequest("/" + id));
+            JsonObject response = deserializeJsonObject(sendDeleteRequest("/task/" + id));
             boolean isSuccessful = response.get("success").getAsBoolean();
 
             if(isSuccessful) {
@@ -103,7 +116,7 @@ public class TaskManagerConsole {
         }
     }
 
-    private void newTask(String[] args) {
+    private void addTask(String[] args) {
         String taskName = args[0];
         boolean isStartable = false;
 
@@ -112,13 +125,8 @@ public class TaskManagerConsole {
         }
 
         try {
-            HttpResponse response = Unirest.post(API_ENDPOINT)
-                    .header("Content-Type", "application/json")
-                    .header("accept", "application/json")
-                    .body("{\"description\":\"" + taskName + "\"}")
-                    .asJson();
-
-            JsonObject task = jsonParser.fromJson(response.getBody().toString(), JsonObject.class);
+            String payload = "{\"description\":\"" + taskName + "\"}";
+            JsonObject task = sendPostRequest("/task", payload);
             System.out.println("Task added with ID " + task.get("id"));
 
             if(isStartable) {
@@ -126,31 +134,24 @@ public class TaskManagerConsole {
                 startTask(task.get("id").getAsInt());
             }
         } catch (UnirestException e) {
-            stopTask();
-            System.out.println("Failed to add new task.");
+            die("Failed to add new task.");
         }
     }
 
     /**
-     * @todo complete!
-     * @param id
+     * Start a new time entry for the task with the given ID.
+     *
+     * @param id - The task's ID.
      */
     private void startTask(int id) {
         JsonObject task = getTask(id);
 
         if(task != null && task.get("id") != null) {
             try {
-                JsonObject timer = sendPostRequest("/" + id + "/start", "");
-
-                if(timer.get("error") != null) {
-                    JsonObject runningEntry = getRunningTimeEntry(id);
-                    assert runningEntry != null;
-                    runTimer(task, runningEntry.get("start").getAsString());
-                } else {
-                    runTimer(task, timer.get("start").getAsString());
-                }
-
+                JsonObject timer = sendPostRequest("/task/" + id + "/start", "");
+                runTimer(task, timer.get("start").getAsString());
             } catch (UnirestException e) {
+                stopTask(id);
                 die("Failed to start task.");
             }
         } else {
@@ -158,38 +159,109 @@ public class TaskManagerConsole {
         }
     }
 
-    private JsonObject getRunningTimeEntry(int taskId) throws UnirestException {
-        JsonObject[] response = deserializeJsonArray(sendGetRequest("/timeentry/running/" + taskId));
+/*    private String getDuration(int taskId) {
+        try {
+            JsonObject task = deserializeJsonObject(sendGetRequest("/tasks/" + taskId));
+            LocalTime now = new LocalTime();
 
-        if(response.length > 0) {
-            return response[0];
+            long elapsedTime = 0;
+            for(JsonElement timeEntry : task.get("time_entries").getAsJsonArray()) {
+                JsonObject entry = (JsonObject)timeEntry;
+                String endTimestamp = entry.get("end").getAsString();
+
+                DateTime startTime = DateTime.parse(entry.get("start").getAsString());
+                DateTime endTime = (endTimestamp != null) ? DateTime.parse(endTimestamp) : now.toDateTimeToday();
+                Duration duration = new Duration(startTime, endTime);
+
+                elapsedTime += duration.getStandardSeconds();
+            }
+
+            return String.format("%02d:%02d:%02d",
+                    TimeUnit.SECONDS.toDays(elapsedTime),
+                    TimeUnit.SECONDS.toMinutes(elapsedTime),
+                    TimeUnit.SECONDS.toSeconds(elapsedTime)
+            );
+
+        } catch (UnirestException e) {
+            die("Failed to calculate task duration.");
         }
 
-        return null;
-    }
+        return "";
+    }*/
 
-    private void stopTask() {
+
+    /**
+     * Stops the given task.
+     */
+    private void stopTask(int id) {
         System.out.println("Stopping task.");
+
+        try {
+            sendPostRequest("/task/" + id + "/stop" + (System.currentTimeMillis() / 1000), "");
+        } catch (UnirestException e) {
+            die("Failed to stop task. The task may have already been stopped.");
+        }
+
+        die("Stopped!");
     }
 
+    /**
+     * Renders a string representation of the timer every second.
+     *
+     * @param task - The task being executed.
+     * @param startTime - The start time of the task.
+     */
     private void runTimer(JsonObject task, String startTime) {
         DateTime start = DateTime.parse(startTime);
 
+        int totalSeconds = 0;
+        for(JsonElement timeEntry : task.get("time_entries").getAsJsonArray()) {
+            JsonObject entry = (JsonObject)timeEntry;
+
+            //Time entries with no end time are still active. Don't include
+            //them in this calculation.
+            JsonElement entryEndTimestamp = entry.get("end");
+
+            if(entryEndTimestamp == null || entryEndTimestamp instanceof JsonNull) {
+                continue;
+            }
+
+            DateTime entryStart = DateTime.parse(entry.get("start").getAsString());
+            DateTime entryEnd = DateTime.parse(entryEndTimestamp.getAsString());
+
+            Duration entryDiff =  new Duration(entryStart, entryEnd);
+            totalSeconds += entryDiff.getStandardSeconds();
+        }
+
         while(true) {
+            //Convert time current time from milliseconds to seconds.
             long timeInSeconds = System.currentTimeMillis() % 1000;
             LocalTime now = new LocalTime();
 
-            System.out.print("\r" + formatTimeDifference(start, now.toDateTimeToday()) + " (ctrl+x to stop)");
+            String timer = formatTimeDifference(start.minusSeconds(totalSeconds), now.toDateTimeToday());
+
+            //Draw the timer to the console.
+            System.out.print("\r" + timer + " (ctrl+c to stop)");
 
             try {
+                //Wait one second before re-drawing timer.
                 Thread.sleep(1000 - timeInSeconds);
             } catch (InterruptedException e) {
-                System.out.println("Task " + task.get("id") + " stopped!");
+                //Let the user know the timer has stopped.
+                die("Task " + task.get("id") + " stopped!");
                 break;
             }
         }
     }
 
+    /**
+     * Formats the difference between DateTimes into a timer.
+     *
+     * @param start - The starting DateTime.
+     * @param end - The ending DateTime.
+     *
+     * @return The timer string.
+     */
     private String formatTimeDifference(DateTime start, DateTime end) {
         Duration duration = new Duration(start, end);
 
@@ -212,7 +284,7 @@ public class TaskManagerConsole {
      */
     private JsonObject getTask(int id) {
         try {
-            return deserializeJsonObject(sendGetRequest("/" + id));
+            return deserializeJsonObject(sendGetRequest("/task/" + id));
         } catch (UnirestException e) {
             die("Failed to load task.");
         }
@@ -224,12 +296,32 @@ public class TaskManagerConsole {
      *
      * @param endpointSuffix - The route to send the request. (e.g /tasks/all)
      * @param payload - The json data to send with the request.
-     * @return
      *
-     * @throws UnirestException
+     * @return The request's response.
+     *
+     * @throws UnirestException - Thrown if the request returns an unsuccessful HTTP response.
      */
     private JsonObject sendPostRequest(String endpointSuffix, String payload) throws UnirestException {
         HttpResponse response = Unirest.post(API_ENDPOINT + endpointSuffix)
+                .header("Content-Type", "application/json")
+                .header("accept", "application/json")
+                .body(payload)
+                .asJson();
+
+        return deserializeJsonObject(response.getBody().toString());
+    }
+
+    /**
+     *
+     * @param endpointSuffix - The route to send the request. (e.g /tasks/all)
+     * @param payload - The json data to send with the request.
+     *
+     * @return The request's response.
+     *
+     * @throws UnirestException - Thrown if the request returns an unsuccessful HTTP response.
+     */
+    private JsonObject sendPatchRequest(String endpointSuffix, String payload) throws UnirestException {
+        HttpResponse response = Unirest.patch(API_ENDPOINT + endpointSuffix)
                 .header("Content-Type", "application/json")
                 .header("accept", "application/json")
                 .body(payload)
@@ -244,7 +336,7 @@ public class TaskManagerConsole {
      * @param endpointSuffix - The route to send the request. (e.g /tasks/all)
      * @return The API response.
      *
-     * @throws UnirestException
+     * @throws UnirestException - Thrown if the request returns an unsuccessful HTTP response.
      */
     private String sendGetRequest(String endpointSuffix) throws UnirestException {
         HttpResponse response = Unirest.get(API_ENDPOINT + endpointSuffix)
@@ -261,7 +353,7 @@ public class TaskManagerConsole {
      * @param endpointSuffix - The route to send the request. (e.g /tasks/all)
      * @return The API response.
      *
-     * @throws UnirestException
+     * @throws UnirestException  - Thrown if the request returns an unsuccessful HTTP response.
      */
     private String sendDeleteRequest(String endpointSuffix) throws UnirestException {
         HttpResponse response = Unirest.delete(API_ENDPOINT + endpointSuffix)
@@ -272,14 +364,34 @@ public class TaskManagerConsole {
         return response.getBody().toString();
     }
 
+    /**
+     * Deserialize a JSON string into a single JsonObject.
+     *
+     * @param json - The string to parse.
+     * @return The parsed object.
+     */
     private JsonObject deserializeJsonObject(String json) {
         return jsonParser.fromJson(json, JsonObject.class);
     }
 
+    /**
+     * Deserialize a JSON string into a list of Json Objects.
+     * @param json - The string to parse.
+     * @return The parsed objects.
+     */
     private JsonObject[] deserializeJsonArray(String json) {
         return jsonParser.fromJson(json, JsonObject[].class);
     }
 
+    /**
+     * Initializes the commandline interface.
+     *
+     * @param args - The string arguments to be parsed.
+     *
+     * @return A commandline containing the parsed options.
+     *
+     * @throws ParseException - Thrown if invalid options are passed into the program.
+     */
     private CommandLine initializeCli(String[] args) throws ParseException {
         return parseCommandLineOptions(args);
     }
@@ -288,8 +400,10 @@ public class TaskManagerConsole {
      * Parse the command line parameters given by the user.
      *
      * @param args - The arguments submitted by the user.
-     * @return
-     * @throws ParseException
+     *
+     * @return A commandline containing the parsed options.
+     *
+     * @throws ParseException - Thrown if invalid options are passed into the program.
      */
     private CommandLine parseCommandLineOptions(String[] args) throws ParseException {
         CommandLineParser parser = new DefaultParser();
@@ -307,9 +421,9 @@ public class TaskManagerConsole {
         Options commands = new Options();
 
         //Add task
-        Option addTask = new Option("new", true, "Create a new task. Optionally start the task.");
+        Option addTask = new Option("add", true, "Create a new task. Optionally start the task.");
         addTask.setArgs(2);
-        addTask.setArgName("new");
+        addTask.setArgName("add");
 
         //Start existing task
         Option startTask = new Option("start", true, "Start an existing task.");
